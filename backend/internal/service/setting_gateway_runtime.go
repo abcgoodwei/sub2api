@@ -726,14 +726,6 @@ func codexHarvestTunableInt(raw map[string]string, key string, fallback, minValu
 	return n
 }
 
-// SetRawKey sets a single setting key directly in the database.
-func (s *SettingService) SetRawKey(ctx context.Context, key, value string) error {
-	if s == nil || s.settingRepo == nil {
-		return errors.New("setting repository unavailable")
-	}
-	return s.settingRepo.Set(ctx, key, value)
-}
-
 // SetRawKeys 批量写入设置，一次 SetMultiple 替代 N 次串行 Set，减少 DB 往返。
 func (s *SettingService) SetRawKeys(ctx context.Context, values map[string]string) error {
 	if s == nil || s.settingRepo == nil {

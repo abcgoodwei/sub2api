@@ -175,13 +175,13 @@ func (s *OpenAIGatewayService) openAICodexTicketConfig() config.OpenAICodexTicke
 		cfg.RefreshBeforeSeconds = 600
 	}
 	if cfg.HarvestProbeIntervalSeconds < 30 {
-		cfg.HarvestProbeIntervalSeconds = 60
+		cfg.HarvestProbeIntervalSeconds = 180
 	}
 	if cfg.HarvestCooldownSeconds <= 0 {
-		cfg.HarvestCooldownSeconds = 60
+		cfg.HarvestCooldownSeconds = 180
 	}
 	if cfg.MaxProbesPerRound <= 0 {
-		cfg.MaxProbesPerRound = 10
+		cfg.MaxProbesPerRound = 6
 	}
 	if cfg.HarvestAttemptTimeoutSeconds <= 0 {
 		cfg.HarvestAttemptTimeoutSeconds = 25

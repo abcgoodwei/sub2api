@@ -485,18 +485,18 @@ let timer: number | undefined
 const autoConfigOpen = ref(false)
 const savingAutoConfig = ref(false)
 const autoConfigForm = ref({
-  probe_interval_seconds: 60,
-  max_probes_per_round: 10,
-  cooldown_seconds: 60,
+  probe_interval_seconds: 180,
+  max_probes_per_round: 6,
+  cooldown_seconds: 180,
   attempt_timeout_seconds: 25,
   refresh_before_seconds: 600,
 })
 
 // 这几个键的服务端默认值（config.go / viper.SetDefault），仅在快照缺字段时兜底。
 const AUTO_CONFIG_FALLBACK = {
-  probe_interval_seconds: 60,
-  max_probes_per_round: 10,
-  cooldown_seconds: 60,
+  probe_interval_seconds: 180,
+  max_probes_per_round: 6,
+  cooldown_seconds: 180,
   attempt_timeout_seconds: 25,
   refresh_before_seconds: 600,
 }
@@ -555,6 +555,8 @@ const selectedManualAccount = ref<CodexHarvestFlowAccount | null>(null)
 const availableManualModels = computed(() => snapshot.value?.harvest?.models || ['gpt-6-astra', 'gpt-5.6-sol'])
 const manualSelectedModels = ref<string[]>(['gpt-6-astra', 'gpt-5.6-sol'])
 const manualHarvesting = ref(false)
+// 当前手动打票请求的取消句柄；停止按钮与组件卸载都用它真正中断后端任务。
+let manualAbortController: AbortController | null = null
 const manualStatusText = ref('待命中')
 const manualStatusColor = ref('text-gray-400')
 const manualProgressText = ref('0 / 20')
@@ -833,6 +835,12 @@ async function startManualHarvest() {
   manualTicketsStoredCount.value = 0
   addManualLog('START', `向账号 #${selectedManualAccount.value.id} 发起定向打票...`)
 
+  // 取消信号要贯穿整个流：仅仅改本地状态不会停掉后端循环，请求会一直跑到
+  // max_attempts。abort 后 fetch 抛错，后端 ctx 也随之取消并停止打上游。
+  manualAbortController?.abort()
+  const controller = new AbortController()
+  manualAbortController = controller
+
   try {
     // 原生 fetch 不经过 apiClient 拦截器，必须手动带上鉴权头，
     // 否则 admin 路由会直接返回 401 UNAUTHORIZED。
@@ -850,6 +858,7 @@ async function startManualHarvest() {
       method: 'POST',
       credentials: 'include',
       headers,
+      signal: controller.signal,
       body: JSON.stringify({
         models: manualSelectedModels.value,
         probe_interval_seconds: manualForm.value.probe_interval_seconds,
@@ -918,13 +927,21 @@ async function startManualHarvest() {
       }
     }
   } catch (err: any) {
-    addManualLog('ERROR', `连接断开或打票中断: ${err.message}`)
+    // 主动终止不是异常：stopManualHarvest 已经把状态与日志写好了。
+    if (!controller.signal.aborted) {
+      addManualLog('ERROR', `连接断开或打票中断: ${err.message}`)
+    }
   } finally {
+    if (manualAbortController === controller) {
+      manualAbortController = null
+    }
     manualHarvesting.value = false
   }
 }
 
 function stopManualHarvest() {
+  manualAbortController?.abort()
+  manualAbortController = null
   manualHarvesting.value = false
   manualStatusText.value = '已停止'
   manualStatusColor.value = 'text-gray-400'
@@ -1147,5 +1164,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('scroll', handleManualAccountViewportChange, true)
   window.removeEventListener('resize', handleManualAccountViewportChange)
   document.removeEventListener('mousedown', handleManualAccountOutsideClick)
+  // 离开页面时不要让后端的打票循环继续跑。
+  manualAbortController?.abort()
+  manualAbortController = null
 })
 </script>

@@ -23,6 +23,68 @@ type ManualHarvestRequest struct {
 	StopOnSuccess            bool     `json:"stop_on_success"`             // 命中合规票后是否自动终止
 }
 
+// 手动打票由管理员直接发起，不经过前端表单，因此服务端必须自行做上下界收敛：
+// 没有上界时一个超大的 probe_interval_seconds / max_attempts 会让请求在服务端
+// 挂很久并持续打上游。范围与前端输入框保持一致。
+const (
+	manualHarvestProbeIntervalMin     = 1
+	manualHarvestProbeIntervalMax     = 300
+	manualHarvestRateLimitCooldownMin = 1
+	manualHarvestRateLimitCooldownMax = 60
+	manualHarvestMaxAttemptsMin       = 1
+	manualHarvestMaxAttemptsMax       = 100
+	manualHarvestMaxModels            = 20
+)
+
+// clampManualHarvestInt 把越界值收敛到 [min,max]，零值/缺省值交给 fallback。
+func clampManualHarvestInt(value, fallback, minValue, maxValue int) int {
+	if value < minValue {
+		if value == 0 {
+			return fallback
+		}
+		return minValue
+	}
+	if value > maxValue {
+		return maxValue
+	}
+	return value
+}
+
+// normalizeManualHarvestRequest 收敛外部传入的参数，任何越界值都会被夹到边界
+// 而不是被拒绝，避免管理员因为一个笔误拿不到结果。
+func normalizeManualHarvestRequest(req *ManualHarvestRequest) {
+	if req == nil {
+		return
+	}
+	req.ProbeIntervalSeconds = clampManualHarvestInt(req.ProbeIntervalSeconds, 10,
+		manualHarvestProbeIntervalMin, manualHarvestProbeIntervalMax)
+	req.RateLimitCooldownSeconds = clampManualHarvestInt(req.RateLimitCooldownSeconds, 30,
+		manualHarvestRateLimitCooldownMin, manualHarvestRateLimitCooldownMax)
+	req.MaxAttempts = clampManualHarvestInt(req.MaxAttempts, 20,
+		manualHarvestMaxAttemptsMin, manualHarvestMaxAttemptsMax)
+
+	models := make([]string, 0, len(req.Models))
+	seen := make(map[string]struct{}, len(req.Models))
+	for _, model := range req.Models {
+		model = normalizeOpenAICodexTicketModel(model)
+		if model == "" {
+			continue
+		}
+		if _, exists := seen[model]; exists {
+			continue
+		}
+		seen[model] = struct{}{}
+		models = append(models, model)
+		if len(models) >= manualHarvestMaxModels {
+			break
+		}
+	}
+	if len(models) == 0 {
+		models = []string{openAICodexTicketDefaultModel, openAICodexTicketDefaultSolModel}
+	}
+	req.Models = models
+}
+
 // ManualHarvestProgress 实时反馈每一步的进度与状态
 type ManualHarvestProgress struct {
 	Attempt     int    `json:"attempt"`
@@ -59,6 +121,14 @@ func (s *OpenAIGatewayService) ExecuteManualHarvest(
 	if err != nil || account == nil {
 		return fmt.Errorf("account %d not found: %w", req.AccountID, err)
 	}
+	// 定向打票会把该账号的 access token 发往 ChatGPT 打票接口，因此必须限定在
+	// 真正支持 Codex 票据的账号上：非 OpenAI 账号、API Key 账号和影子账号都
+	// 拿不到合规票据，直接拒绝而不是发一次注定失败的请求。
+	if !isOpenAICodexTicketAccount(account) {
+		return fmt.Errorf("account %d does not support Codex ticket harvesting", req.AccountID)
+	}
+
+	normalizeManualHarvestRequest(&req)
 
 	cfg := s.openAICodexTicketConfig()
 	proxyURL := s.openAICodexTicketHarvestProxyURLContext(ctx)
@@ -68,19 +138,6 @@ func (s *OpenAIGatewayService) ExecuteManualHarvest(
 
 	expectedBlocks := openAICodexTicketExpectedBlocks(account)
 	expectedLength := openAICodexTicketTargetLength(account, cfg)
-
-	if len(req.Models) == 0 {
-		req.Models = []string{openAICodexTicketDefaultModel, openAICodexTicketDefaultSolModel}
-	}
-	if req.ProbeIntervalSeconds < 1 {
-		req.ProbeIntervalSeconds = 10
-	}
-	if req.RateLimitCooldownSeconds < 1 {
-		req.RateLimitCooldownSeconds = 30
-	}
-	if req.MaxAttempts < 1 {
-		req.MaxAttempts = 20
-	}
 
 	consecutiveFails := 0
 	ticketsStored := 0
@@ -123,7 +180,9 @@ func (s *OpenAIGatewayService) ExecuteManualHarvest(
 					Message:     "无法获取该账号的登录令牌，本次尝试已跳过",
 					Detail:      fmt.Sprintf("get access token failed: %v", err),
 				})
-				time.Sleep(time.Duration(req.ProbeIntervalSeconds) * time.Second)
+				if err := sleepWithContext(ctx, time.Duration(req.ProbeIntervalSeconds)*time.Second); err != nil {
+					return err
+				}
 				continue
 			}
 
@@ -185,7 +244,9 @@ func (s *OpenAIGatewayService) ExecuteManualHarvest(
 					consecutiveFails = 0
 				}
 
-				time.Sleep(time.Duration(req.ProbeIntervalSeconds) * time.Second)
+				if err := sleepWithContext(ctx, time.Duration(req.ProbeIntervalSeconds)*time.Second); err != nil {
+					return err
+				}
 				continue
 			}
 
@@ -211,7 +272,9 @@ func (s *OpenAIGatewayService) ExecuteManualHarvest(
 					Message:     message,
 					Detail:      detail,
 				})
-				time.Sleep(time.Duration(req.ProbeIntervalSeconds) * time.Second)
+				if err := sleepWithContext(ctx, time.Duration(req.ProbeIntervalSeconds)*time.Second); err != nil {
+					return err
+				}
 				continue
 			}
 
@@ -270,7 +333,9 @@ func (s *OpenAIGatewayService) ExecuteManualHarvest(
 				}
 			}
 
-			time.Sleep(time.Duration(req.ProbeIntervalSeconds) * time.Second)
+			if err := sleepWithContext(ctx, time.Duration(req.ProbeIntervalSeconds)*time.Second); err != nil {
+				return err
+			}
 		}
 	}
 

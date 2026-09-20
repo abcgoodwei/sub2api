@@ -1,7 +1,9 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -111,7 +113,10 @@ func (h *AccountHandler) UpdateCodexHarvestConfig(c *gin.Context) {
 		return
 	}
 
+	// 先失效缓存再唤醒：后台采票循环用同一个 SettingService，改完参数后应当立即
+	// 按新节拍重排定时器，而不是等原来的（可能长达 1800 秒的）周期走完。
 	h.codexTicketSettings.InvalidateCodexHarvestCaches()
+	h.codexTicketSettings.NotifyCodexHarvest()
 	response.Success(c, gin.H{"message": "自动打票参数已成功保存并生效"})
 }
 
@@ -147,9 +152,23 @@ func (h *AccountHandler) ManualCodexHarvest(c *gin.Context) {
 		return
 	}
 
-	_ = h.openAIGatewayService.ExecuteManualHarvest(ctx, req, func(p service.ManualHarvestProgress) {
-		data, _ := json.Marshal(p)
+	writeProgress := func(p service.ManualHarvestProgress) {
+		data, err := json.Marshal(p)
+		if err != nil {
+			return
+		}
 		_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", data)
 		flusher.Flush()
-	})
+	}
+	// The SSE headers are already committed, so a rejected request is reported as
+	// a final error event instead of an HTTP status. Client-side cancellation is
+	// expected (the stop button) and must not be surfaced as a failure.
+	if err := h.openAIGatewayService.ExecuteManualHarvest(ctx, req, writeProgress); err != nil && !errors.Is(err, context.Canceled) {
+		writeProgress(service.ManualHarvestProgress{
+			Result:  "error",
+			Level:   "ERROR",
+			Message: err.Error(),
+			Done:    true,
+		})
+	}
 }

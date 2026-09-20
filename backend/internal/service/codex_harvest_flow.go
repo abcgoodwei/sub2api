@@ -606,13 +606,13 @@ func BuildCodexHarvestFlow(ctx context.Context, cfg *config.Config, settings *Se
 		ticketCfg.TargetLength = 292
 	}
 	if ticketCfg.HarvestProbeIntervalSeconds < 30 {
-		ticketCfg.HarvestProbeIntervalSeconds = 60
+		ticketCfg.HarvestProbeIntervalSeconds = 180
 	}
 	if ticketCfg.HarvestCooldownSeconds <= 0 {
-		ticketCfg.HarvestCooldownSeconds = 60
+		ticketCfg.HarvestCooldownSeconds = 180
 	}
 	if ticketCfg.MaxProbesPerRound <= 0 {
-		ticketCfg.MaxProbesPerRound = 10
+		ticketCfg.MaxProbesPerRound = 6
 	}
 	if len(ticketCfg.Models) == 0 {
 		ticketCfg.Models = []string{openAICodexTicketDefaultModel, openAICodexTicketDefaultSolModel}
