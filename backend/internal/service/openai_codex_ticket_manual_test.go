@@ -29,16 +29,17 @@ func (r *manualHarvestAccountRepo) UpdateExtra(ctx context.Context, _ int64, _ m
 	return r.persist(ctx)
 }
 
+// Persistence tests use the mock transport, not a real managed Mihomo lease.
 func TestManualHarvestPersistenceOutcome(t *testing.T) {
 	for _, scenario := range []string{"success", "failure", "cancelled"} {
 		t.Run(scenario, func(t *testing.T) {
 			resetCodexHarvestFlow()
 			t.Cleanup(resetCodexHarvestFlow)
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			account := ticketTestAccount(41)
 			calls := 0
-			svc := ticketTestService(t, config.OpenAICodexTicketConfig{TTLSeconds: 3600}, &codexTicketFuncUpstream{do: func(*http.Request) (*http.Response, error) {
+			svc := ticketTestService(t, config.OpenAICodexTicketConfig{TTLSeconds: 3600, HarvestProxyURL: "http://mock-harvest.invalid:8080"}, &codexTicketFuncUpstream{do: func(*http.Request) (*http.Response, error) {
 				calls++
 				return codexTicketResponse(), nil
 			}})
@@ -88,7 +89,7 @@ func TestManualHarvestPersistenceRetryDoesNotStopOnCapture(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	account := ticketTestAccount(41)
-	svc := ticketTestService(t, config.OpenAICodexTicketConfig{TTLSeconds: 3600}, &codexTicketFuncUpstream{do: func(*http.Request) (*http.Response, error) { return codexTicketResponse(), nil }})
+	svc := ticketTestService(t, config.OpenAICodexTicketConfig{TTLSeconds: 3600, HarvestProxyURL: "http://mock-harvest.invalid:8080"}, &codexTicketFuncUpstream{do: func(*http.Request) (*http.Response, error) { return codexTicketResponse(), nil }})
 	writes := 0
 	svc.accountRepo = &manualHarvestAccountRepo{account: account, persist: func(context.Context) error {
 		writes++
