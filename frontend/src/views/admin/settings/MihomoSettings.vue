@@ -20,10 +20,11 @@
       <details v-if="status.node_states?.length">
         <label class="my-2 flex items-center gap-2 text-sm"><input type="checkbox" :checked="status.use_once" :disabled="pending || status.busy" @change="operate(status.use_once ? 'once_off' : 'once_on')" />{{ text('打票节点用后移出（需手动恢复）', 'Retire each harvest node after use (manual recovery)') }}</label>
         <summary class="cursor-pointer text-sm">{{ text('节点管理', 'Manage nodes') }}</summary>
-        <p class="my-2 text-xs text-gray-500">{{ text('检测仅测试网络连接，不调用模型。失败或停用节点需手动恢复。', 'Tests network connectivity only. Failed or disabled nodes require manual recovery.') }}</p>
+        <p class="my-2 text-xs text-gray-500">{{ text('打票成功后按账号固定出口，各模型共用；不同账号不分配同一已测出口 IP。检测不调用模型，失败或停用节点需手动恢复。', 'Successful tickets pin an exit per account across models. Measured exit IPs are not shared between accounts. Tests do not call models; failed or disabled nodes require manual recovery.') }}</p>
         <div class="max-h-64 overflow-auto">
           <div v-for="node in status.node_states" :key="node.name" class="flex items-center gap-2 py-1 text-xs">
             <span>{{ node.display_name || node.name }}</span><span>{{ node.state }}</span>
+            <span v-if="node.bound_account_id" :title="node.bound_until ? new Date(node.bound_until).toLocaleString() : ''">{{ text('绑定账号', 'Account') }} #{{ node.bound_account_id }} · {{ node.bound_exit_ip }}</span>
             <span :title="node.country_checked_at ? new Date(node.country_checked_at).toLocaleString() : ''">{{ node.country_code || text('地区未知', 'Unknown region') }}</span>
             <button type="button" class="btn btn-secondary btn-sm" :disabled="pending || status.busy" @click="operate('country_probe/' + node.name)">{{ text('检测地区', 'Check region') }}</button>
             <button type="button" class="btn btn-secondary btn-sm" :disabled="pending || status.busy || !status.running" @click="operate('probe/' + node.name)">{{ text('检测', 'Test') }}</button>

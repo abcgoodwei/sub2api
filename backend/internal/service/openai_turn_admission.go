@@ -349,6 +349,7 @@ func (s *OpenAIGatewayService) admitOpenAITurnWithGroup(
 // A connection is bound to the ticket actually sent at handshake, not the
 // response's turn-state header and not the most recently harvested standby.
 type openAIWSTurnBinding struct {
+	egressNode  string
 	model       string
 	ticket      *openAICodexTicket
 	fingerprint [32]byte
@@ -362,6 +363,16 @@ func (s *OpenAIGatewayService) bindOpenAIWSHandshake(account *Account, model str
 		copy := *ticket
 		copy.Standby = nil
 		b.ticket = &copy
+		b.egressNode = copy.EgressNode
+	}
+	if b.egressNode == "" && s.openAICodexTicketEnabled() {
+		for _, model := range s.openAICodexTicketConfig().Models {
+			current := s.lookupOpenAICodexTicket(account, model)
+			if current != nil && current.EgressNode != "" && current.valid(time.Now(), openAICodexTicketTargetLength(account, s.openAICodexTicketConfig())) {
+				b.egressNode = current.EgressNode
+				break
+			}
+		}
 	}
 	return b
 }
@@ -371,15 +382,23 @@ func (s *OpenAIGatewayService) checkOpenAIWSBinding(account *Account, model stri
 		time.Since(b.createdAt) >= openAIWSConnMaxAge {
 		return denyOpenAITurn("connection_binding_expired")
 	}
+	if b.egressNode != "" {
+		if _, err := s.resolveCodexTicketProxy(account.ID, b.egressNode); err != nil {
+			return denyOpenAITurn("ticket_egress_unavailable")
+		}
+	}
 	if !isOpenAICodexTicketAccount(account) || !s.openAICodexTicketEnabled() ||
-		!s.openAICodexTicketConfig().FailClosed || !s.openAICodexTicketGatedModel(model) {
+		!s.openAICodexTicketGatedModel(model) {
+		return nil
+	}
+	if !s.openAICodexTicketConfig().FailClosed && (b.ticket == nil || b.ticket.EgressNode == "") {
 		return nil
 	}
 	if b.ticket == nil {
 		return denyOpenAITurn("connection_ticket_missing")
 	}
 	if b.model != strings.TrimSpace(model) || !b.ticket.valid(time.Now(), openAICodexTicketTargetLength(account, s.openAICodexTicketConfig())) ||
-		!ticketIdentityMatches(account, b.ticket) {
+		!ticketIdentityMatches(account, b.ticket) || !s.codexTicketEgressReady(b.ticket) {
 		return denyOpenAITurn("connection_ticket_expired")
 	}
 	// Require the bound ticket still to be known to the authoritative inventory.

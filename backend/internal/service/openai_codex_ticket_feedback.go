@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"github.com/Wei-Shaw/sub2api/internal/mihomo"
 	"net/http"
 	"time"
 )
@@ -60,6 +61,11 @@ func (s *OpenAIGatewayService) observeCodexTicketResponse(req *http.Request, res
 		current := s.lookupCodexTicketLocked(account, model)
 		if current == nil || current.State != sent || current.Revoked {
 			continue
+		}
+		if current.EgressNode != "" {
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(req.Context()), time.Second)
+			mihomo.ReleaseAccountBinding(ctx, account.ID, current.EgressNode)
+			cancel()
 		}
 		next := *current
 		if current.Standby.valid(time.Now(), openAICodexTicketTargetLength(account, cfg)) {

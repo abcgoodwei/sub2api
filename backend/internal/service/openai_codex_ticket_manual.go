@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Wei-Shaw/sub2api/internal/mihomo"
 	"net/http"
 	"strings"
 	"time"
@@ -150,6 +151,9 @@ func (s *OpenAIGatewayService) ExecuteManualHarvest(
 
 			token, _, err := s.GetAccessToken(ctx, account)
 			if err != nil || strings.TrimSpace(token) == "" {
+				if s.rejectCodexHarvestCredentials(account, 0, err) {
+					return errCodexHarvestCredentials
+				}
 
 				progressCallback(ManualHarvestProgress{
 					Attempt:     attempt,
@@ -166,12 +170,22 @@ func (s *OpenAIGatewayService) ExecuteManualHarvest(
 				continue
 			}
 
-			stopWatch := watchCodexHarvestExit(proxyURL)
+			stopWatch := func() string { return "" }
+			if proxyURL != mihomo.Endpoint {
+				stopWatch = watchCodexHarvestExit(proxyURL)
+			}
+			var egressNode string
 			state, status, perr := s.fireOpenAICodexTicketProbe(
 				ctx, account, token, model, proxyURL,
-				time.Duration(cfg.HarvestAttemptTimeoutSeconds)*time.Second,
+				time.Duration(cfg.HarvestAttemptTimeoutSeconds)*time.Second, &egressNode,
 			)
 			currentNode := stopWatch()
+			if egressNode != "" {
+				currentNode = mihomo.PinnedNodeName(egressNode)
+			}
+			if s.rejectCodexHarvestCredentials(account, status, nil, token) {
+				return errCodexHarvestCredentials
+			}
 			length := len(state)
 			shape, shapeErr := parseOpenAICodexTicketShape(state)
 			blocks := shape.Blocks
@@ -258,6 +272,7 @@ func (s *OpenAIGatewayService) ExecuteManualHarvest(
 
 				now := time.Now()
 				ticket := &openAICodexTicket{
+					EgressNode: egressNode,
 					AccountID:  account.ID,
 					Model:      model,
 					State:      state,

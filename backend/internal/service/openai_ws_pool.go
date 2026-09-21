@@ -77,6 +77,7 @@ type openAIWSAcquireRequest struct {
 	HeadersFactory  func(context.Context, http.Header) (http.Header, error)
 	BindHandshake   func(http.Header) *openAIWSTurnBinding
 	CheckBinding    func(context.Context, *openAIWSTurnBinding) error
+	ProxyURLFactory func(context.Context, http.Header, string) (string, error)
 	ProxyURL        string
 	PreferredConnID string
 	// ForceNewConn: 强制本次获取新连接（避免复用导致连接内续链状态互相污染）。
@@ -2136,7 +2137,14 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 			return nil, err
 		}
 	}
-	conn, status, handshakeHeaders, err := p.clientDialer.Dial(ctx, req.WSURL, headers, req.ProxyURL)
+	proxyURL := req.ProxyURL
+	if req.ProxyURLFactory != nil {
+		proxyURL, err = req.ProxyURLFactory(ctx, headers, proxyURL)
+		if err != nil {
+			return nil, err
+		}
+	}
+	conn, status, handshakeHeaders, err := p.clientDialer.Dial(ctx, req.WSURL, headers, proxyURL)
 	if err != nil {
 		var handshakeErr *openAIWSHandshakeError
 		var responseBody []byte

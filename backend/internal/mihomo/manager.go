@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -62,6 +63,9 @@ type Status struct {
 }
 
 type NodeStatus struct {
+	BoundAccountID   int64      `json:"bound_account_id,omitempty"`
+	BoundExitIP      string     `json:"bound_exit_ip,omitempty"`
+	BoundUntil       *time.Time `json:"bound_until,omitempty"`
 	CountryCode      string     `json:"country_code,omitempty"`
 	CountryCheckedAt *time.Time `json:"country_checked_at,omitempty"`
 	CountryError     string     `json:"country_error,omitempty"`
@@ -72,6 +76,7 @@ type NodeStatus struct {
 }
 
 type saved struct {
+	Bindings      map[string]AccountBinding     `json:"account_bindings,omitempty"`
 	CountryFilter CountryFilter                 `json:"country_filter"`
 	Countries     map[string]CountryObservation `json:"countries,omitempty"`
 	UseOnce       bool                          `json:"use_once,omitempty"`
@@ -83,6 +88,8 @@ type saved struct {
 }
 
 type Manager struct {
+	pinnedProxyURL   string // test-only loopback proxy override
+	probeCursor      uint64
 	countryLookupURL string // test-only override; administrators cannot change the lookup target
 	controllerURL    string // optional override for isolated controller tests
 	gate             chan struct{}
@@ -152,6 +159,17 @@ func (m *Manager) Status() Status {
 				checked := observation.CheckedAt
 				node.CountryCheckedAt = &checked
 			}
+
+			fingerprint := nodeBinding(n)
+			for id, binding := range m.saved.Bindings {
+				if binding.Node == fingerprint && time.Now().Before(binding.ExpiresAt) {
+					node.BoundAccountID, _ = strconv.ParseInt(id, 10, 64)
+					node.BoundExitIP = binding.IP
+					until := binding.ExpiresAt
+					node.BoundUntil = &until
+					break
+				}
+			}
 			s.NodeStates = append(s.NodeStates, node)
 		}
 	}
@@ -220,6 +238,7 @@ func (m *Manager) Submit(action string, urls []string, appendURLs bool, filters 
 		if err == nil {
 			// A queued operation must see any node retired by the preceding lease.
 			m.mu.Lock()
+			next.Bindings = m.saved.Bindings
 			next.Disabled = m.saved.Disabled
 			next.UseOnce = m.saved.UseOnce
 			m.mu.Unlock()
@@ -562,7 +581,9 @@ func (m *Manager) config(s saved) ([]byte, error) {
 		delete(group, "url")
 		delete(group, "interval")
 	}
-	return json.Marshal(map[string]any{"mixed-port": 3101, "allow-lan": false, "bind-address": "127.0.0.1", "mode": "rule", "log-level": "silent", "external-controller": "127.0.0.1:9098", "secret": s.Secret, "proxies": s.Nodes, "proxy-groups": []any{group}, "rules": []string{"MATCH,CODEX-ROTATE"}})
+	listener, rules := pinnedConfig(s)
+	rules = append(rules, "MATCH,CODEX-ROTATE")
+	return json.Marshal(map[string]any{"listeners": []any{listener}, "mixed-port": 3101, "allow-lan": false, "bind-address": "127.0.0.1", "mode": "rule", "log-level": "silent", "external-controller": "127.0.0.1:9098", "secret": s.Secret, "proxies": s.Nodes, "proxy-groups": []any{group}, "rules": rules})
 }
 
 func (m *Manager) control(ctx context.Context, method, path, secret string, payload []byte) error {

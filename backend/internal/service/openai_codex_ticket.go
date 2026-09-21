@@ -45,6 +45,7 @@ const (
 var ErrOpenAICodexTicketUnavailable = errors.New("codex turn-state ticket unavailable")
 
 type openAICodexTicket struct {
+	EgressNode string             `json:"egress_node,omitempty"`
 	AccountID  int64              `json:"account_id"`
 	Model      string             `json:"model"`
 	State      string             `json:"state"`
@@ -450,7 +451,7 @@ func (s *OpenAIGatewayService) storeOpenAICodexTicketPersisted(ctx context.Conte
 	defer s.openaiCodexTicketStateMu.Unlock()
 	model := normalizeOpenAICodexTicketModel(ticket.Model)
 	ticket.Identity = ticketIdentity(account)
-	if current := s.lookupCodexTicketLocked(account, model); current.valid(time.Now(), openAICodexTicketTargetLength(account, s.openAICodexTicketConfig())) && current.State != ticket.State {
+	if current := s.lookupCodexTicketLocked(account, model); current.valid(time.Now(), openAICodexTicketTargetLength(account, s.openAICodexTicketConfig())) && s.codexTicketEgressReady(current) && current.State != ticket.State {
 		copy := *current
 		copy.Standby = ticket
 		ticket = &copy
@@ -497,7 +498,7 @@ func (s *OpenAIGatewayService) applyOpenAICodexTicket(ctx context.Context, accou
 		return denyOpenAITicket()
 	}
 	ticket := s.lookupOpenAICodexTicket(account, model)
-	if ticket.valid(time.Now(), openAICodexTicketTargetLength(account, cfg)) {
+	if ticket.valid(time.Now(), openAICodexTicketTargetLength(account, cfg)) && s.codexTicketEgressReady(ticket) {
 		h.Set(openAICodexTurnStateHeader, ticket.State)
 		return nil
 	}
@@ -555,7 +556,7 @@ func (s *OpenAIGatewayService) openAICodexTicketBlocksAccount(account *Account, 
 		return true
 	}
 	ticket := s.lookupOpenAICodexTicket(account, model)
-	return !ticket.valid(time.Now(), openAICodexTicketTargetLength(account, cfg))
+	return !ticket.valid(time.Now(), openAICodexTicketTargetLength(account, cfg)) || !s.codexTicketEgressReady(ticket)
 }
 
 func (s *OpenAIGatewayService) openAICodexTicketReadyForRequest(account *Account, requestedModel string, requireCompact bool) bool {
@@ -571,7 +572,7 @@ func (s *OpenAIGatewayService) openAICodexTicketReadyForRequest(account *Account
 		return false
 	}
 	ticket := s.lookupOpenAICodexTicket(account, model)
-	return ticket.valid(time.Now(), openAICodexTicketTargetLength(account, s.openAICodexTicketConfig()))
+	return ticket.valid(time.Now(), openAICodexTicketTargetLength(account, s.openAICodexTicketConfig())) && s.codexTicketEgressReady(ticket)
 }
 
 func extraTruthy(value any) bool {
@@ -672,14 +673,27 @@ func (s *OpenAIGatewayService) openAICodexTicketShouldYieldSticky(ctx context.Co
 	return s.openAICodexTicketShouldYieldStickyTo(sticky, candidates, requestedModel, requireCompact, excludedIDs)
 }
 
-func (s *OpenAIGatewayService) fireOpenAICodexTicketProbe(ctx context.Context, account *Account, token, model, proxyURL string, attemptTimeout time.Duration) (state string, status int, err error) {
+func (s *OpenAIGatewayService) fireOpenAICodexTicketProbe(ctx context.Context, account *Account, token, model, proxyURL string, attemptTimeout time.Duration, egressNode ...*string) (state string, status int, err error) {
 	// Queueing behind another account must not consume this probe's upstream
 	// timeout; every selected account receives a full bounded attempt.
-	releaseNode, leaseErr := mihomo.Lease(ctx, proxyURL)
+	probeProxy, binding, releaseNode, leaseErr := mihomo.LeasePinnedProbe(ctx, proxyURL, account.ID)
 	if leaseErr != nil {
 		return "", 0, leaseErr
 	}
-	defer func() { releaseNode(err == nil && status == http.StatusOK) }()
+	if len(egressNode) > 0 && egressNode[0] != nil {
+		*egressNode[0] = binding
+	}
+	proxyURL = probeProxy
+	defer func() {
+		shape, shapeErr := parseOpenAICodexTicketShape(state)
+		cfg := s.openAICodexTicketConfig()
+		expires := time.Now().Add(time.Duration(cfg.TTLSeconds) * time.Second)
+		if limit := shape.IssuedAt.Add(time.Hour - 30*time.Second); limit.Before(expires) {
+			expires = limit
+		}
+		success := err == nil && status == http.StatusOK && shapeErr == nil && shape.Blocks == openAICodexTicketExpectedBlocks(account) && len(state) == openAICodexTicketTargetLength(account, cfg) && time.Now().Before(expires) && !shape.IssuedAt.After(time.Now().Add(30*time.Second))
+		releaseNode(success, expires)
+	}()
 	attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
 	defer cancel()
 
@@ -944,10 +958,10 @@ func (s *OpenAIGatewayService) refreshOpenAICodexTickets(ctx context.Context) {
 				continue
 			}
 			ticket := s.lookupOpenAICodexTicket(&account, model)
-			if ticket.valid(now, openAICodexTicketTargetLength(&account, cfg)) && !ticket.needsRefresh(now, refreshBefore) {
+			if ticket.valid(now, openAICodexTicketTargetLength(&account, cfg)) && s.codexTicketEgressReady(ticket) && (ticket.EgressNode != "" || !ticket.needsRefresh(now, refreshBefore)) {
 				continue
 			}
-			if ticket != nil && ticket.Standby.valid(now, openAICodexTicketTargetLength(&account, cfg)) && !ticket.Standby.needsRefresh(now, refreshBefore) {
+			if ticket != nil && ticket.Standby.valid(now, openAICodexTicketTargetLength(&account, cfg)) && s.codexTicketEgressReady(ticket.Standby) && !ticket.Standby.needsRefresh(now, refreshBefore) {
 				continue
 			}
 			acc := account
@@ -979,7 +993,7 @@ func (s *OpenAIGatewayService) refreshOpenAICodexTickets(ctx context.Context) {
 // gAAAAA 前缀）就落库；否则记 Info miss，交给下个周期重试。同一 key 并发去重，避免上一发还没
 // 回来又叠一发。
 func (s *OpenAIGatewayService) probeOnceOpenAICodexTicket(ctx context.Context, account *Account, model string) {
-	if account != nil && account.IsRateLimited() {
+	if account != nil && (account.IsRateLimited() || account.Status == StatusError || account.Status == StatusDisabled) {
 		return
 	}
 	if s == nil || !isOpenAICodexTicketAccount(account) || ctx.Err() != nil || !s.openAICodexTicketEnabledContext(ctx) {
@@ -999,21 +1013,34 @@ func (s *OpenAIGatewayService) probeOnceOpenAICodexTicket(ctx context.Context, a
 		length, blocks := 0, 0
 		expectedLength := openAICodexTicketTargetLength(account, cfg)
 		expectedBlocks := openAICodexTicketExpectedBlocks(account)
-		stopWatch := watchCodexHarvestExit(proxyURL)
+		var egressNode string
+		stopWatch := func() string { return "" }
+		if proxyURL != mihomo.Endpoint {
+			stopWatch = watchCodexHarvestExit(proxyURL)
+		}
 		defer func() {
 			node := stopWatch()
+			if egressNode != "" {
+				node = mihomo.PinnedNodeName(egressNode)
+			}
 			s.recordCodexProbe(ctx, account, model, result, httpStatus)
 			recordCodexHarvestProbe(account, model, result, node, "", httpStatus, length, blocks, expectedLength, expectedBlocks)
 		}()
 		token, _, err := s.GetAccessToken(ctx, account)
 		if err != nil || strings.TrimSpace(token) == "" {
 			s.cooldownTicketProbe(account.ID, model, cfg)
+			s.rejectCodexHarvestCredentials(account, 0, err)
 			logger.L().Info("openai_codex_ticket probe miss",
 				zap.Int64("account_id", account.ID), zap.String("model", model),
-				zap.String("reason", "token"), zap.Error(err))
+				zap.String("reason", "token"), zap.Bool("credentials_rejected", isTerminalOpenAICredentialError(err)))
 			return nil, nil
 		}
-		state, status, perr := s.fireOpenAICodexTicketProbe(ctx, account, token, model, proxyURL, time.Duration(cfg.HarvestAttemptTimeoutSeconds)*time.Second)
+		state, status, perr := s.fireOpenAICodexTicketProbe(ctx, account, token, model, proxyURL, time.Duration(cfg.HarvestAttemptTimeoutSeconds)*time.Second, &egressNode)
+		if s.rejectCodexHarvestCredentials(account, status, nil, token) {
+			s.cooldownTicketProbe(account.ID, model, cfg)
+			result, httpStatus = "credentials_rejected", status
+			return nil, nil
+		}
 		httpStatus = status
 		length = len(state)
 		result = "response_incomplete_or_error"
@@ -1040,6 +1067,7 @@ func (s *OpenAIGatewayService) probeOnceOpenAICodexTicket(ctx context.Context, a
 		s.openaiCodexTicketProbeCooldown.Delete(openAICodexTicketKey(account.ID, model))
 		now := time.Now()
 		ticket := &openAICodexTicket{
+			EgressNode: egressNode,
 			AccountID:  account.ID,
 			Model:      model,
 			State:      state,

@@ -143,6 +143,7 @@ docs/*
 !docs/PLUGIN_DEVELOPMENT.md
 !docs/channel-monitor-v2-safe-defaults.md
 !docs/cyber-session-blocking.md
+!docs/codex-ticket-egress.md
 !docs/legal/
 !docs/legal/*.md
 !docs/screenshots/

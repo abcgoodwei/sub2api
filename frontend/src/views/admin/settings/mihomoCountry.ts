@@ -4,6 +4,9 @@ export interface CountryFilter {
   allow_unknown: boolean
 }
 export interface CountryNode {
+  bound_account_id?: number
+  bound_exit_ip?: string
+  bound_until?: string
   display_name?: string
   name: string
   state: string

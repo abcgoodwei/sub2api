@@ -884,6 +884,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			}
 			return nil
 		},
+		ProxyURLFactory: s.codexTicketWSProxyFactory(account),
 		ProxyURL: func() string {
 			if account.ProxyID != nil && account.Proxy != nil {
 				return account.Proxy.URL()

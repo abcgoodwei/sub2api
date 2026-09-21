@@ -117,6 +117,9 @@ func runtimeProxyErrorAttribution(account *Account, err error) (*int64, string) 
 		return opsUpstreamProxyAttribution(account)
 	}
 	if attemptErr.target.proxyID == 0 {
+		if attemptErr.target.proxyName != "" {
+			return nil, attemptErr.target.proxyName
+		}
 		return nil, opsProxyNameDirect
 	}
 	id := attemptErr.target.proxyID
