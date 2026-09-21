@@ -1,15 +1,20 @@
 package mihomo
 
 import (
+	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,6 +42,31 @@ func TestPinnedAccountRoutesWithOfficialKernel(t *testing.T) {
 	nodes := []map[string]any{}
 	for i, ip := range []string{"203.0.113.1", "203.0.113.1", "203.0.113.2"} {
 		proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodConnect {
+				hijacker, ok := w.(http.Hijacker)
+				if !ok {
+					w.WriteHeader(500)
+					return
+				}
+				conn, rw, err := hijacker.Hijack()
+				if err != nil {
+					return
+				}
+				defer func() { _ = conn.Close() }()
+				_, _ = rw.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n")
+				if rw.Flush() != nil {
+					return
+				}
+				nested, err := http.ReadRequest(rw.Reader)
+				if err != nil {
+					return
+				}
+				_ = nested.Body.Close()
+				payload, _ := json.Marshal(map[string]string{"ip": ip})
+				reply := &http.Response{StatusCode: 200, ProtoMajor: 1, ProtoMinor: 1, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(string(payload))), ContentLength: int64(len(payload)), Close: true}
+				_ = reply.Write(conn)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]string{"ip": ip})
 		}))
 		defer proxy.Close()
@@ -69,6 +99,33 @@ func TestPinnedAccountRoutesWithOfficialKernel(t *testing.T) {
 		require.NoError(t, err)
 		return string(b)
 	}
+	connectRequest := func(proxy string) string {
+		u, err := url.Parse(proxy)
+		require.NoError(t, err)
+		conn, err := net.DialTimeout("tcp", u.Host, 5*time.Second)
+		require.NoError(t, err)
+		defer func() { _ = conn.Close() }()
+		require.NoError(t, conn.SetDeadline(time.Now().Add(5*time.Second)))
+		password, _ := u.User.Password()
+		auth := base64.StdEncoding.EncodeToString([]byte(u.User.Username() + ":" + password))
+		_, err = fmt.Fprintf(conn, "CONNECT example.test:443 HTTP/1.1\r\nHost: example.test:443\r\nProxy-Authorization: Basic %s\r\n\r\n", auth)
+		require.NoError(t, err)
+		reader := bufio.NewReader(conn)
+		tunnel, err := http.ReadResponse(reader, &http.Request{Method: http.MethodConnect})
+		require.NoError(t, err)
+		require.Equal(t, 200, tunnel.StatusCode)
+		_, err = fmt.Fprint(conn, "GET /business HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n")
+		require.NoError(t, err)
+		response, err := http.ReadResponse(reader, nil)
+		require.NoError(t, err)
+		defer func() { _ = response.Body.Close() }()
+		b, err := io.ReadAll(response.Body)
+		require.NoError(t, err)
+		return string(b)
+	}
+	// CONNECT is the route used by HTTPS and WebSocket handshakes.
+	require.Contains(t, connectRequest(first), "203.0.113.1")
+	require.Contains(t, connectRequest(second), "203.0.113.2")
 	// Round-robin/default group changes cannot affect the two pinned inbounds.
 	for range 3 {
 		require.Contains(t, request(first), "203.0.113.1")
