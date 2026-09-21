@@ -39,6 +39,17 @@ func TestCodexTicketPinnedHTTPAndWSUseSameAccountExit(t *testing.T) {
 	bare, err := svc.codexTicketWSProxyFactory(account)(context.Background(), http.Header{}, proxy.URL())
 	require.NoError(t, err)
 	require.Equal(t, wsProxy, bare, "non-ticket models must share the account exit without borrowing another model's state")
+	// A transport failure is attributed to the pinned exit, not the account's
+	// ordinary proxy or direct networking, and never falls back to direct.
+	up.err = errors.New("synthetic connection refused")
+	beforeFailure := len(up.requests)
+	_, err = svc.doOpenAIUpstream(req, proxy.URL(), account)
+	require.Error(t, err)
+	require.Len(t, up.requests, beforeFailure+1)
+	proxyID, name := runtimeProxyErrorAttribution(account, err)
+	require.Nil(t, proxyID)
+	require.Equal(t, opsProxyNameCodexTicket, name)
+	up.err = nil
 	// Missing node blocks before sending; the account's direct fallback is not used.
 	svc.codexTicketProxyResolver = func(int64, string) (string, error) { return "", errors.New("removed") }
 	before := len(up.requests)

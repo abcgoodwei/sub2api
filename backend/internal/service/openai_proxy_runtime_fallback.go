@@ -17,6 +17,8 @@ import (
 // The primary and a final explicitly authorized direct attempt are additional.
 const maxRuntimeProxyFallbackHops = 4
 
+const opsProxyNameCodexTicket = "codex_ticket"
+
 type runtimeProxyEgress struct {
 	url       string
 	proxyID   int64 // zero explicitly means direct, not the account's bound proxy
@@ -117,7 +119,7 @@ func runtimeProxyErrorAttribution(account *Account, err error) (*int64, string) 
 		return opsUpstreamProxyAttribution(account)
 	}
 	if attemptErr.target.proxyID == 0 {
-		if attemptErr.target.proxyName != "" {
+		if attemptErr.target.proxyName == opsProxyNameCodexTicket {
 			return nil, attemptErr.target.proxyName
 		}
 		return nil, opsProxyNameDirect

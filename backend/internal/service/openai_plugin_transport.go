@@ -30,7 +30,7 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL 
 	// Keep ticket observation/strict validation around the final response,
 	// while every egress attempt retains its own plugin routing and trace.
 	if pinned {
-		return s.doOpenAIProxyAttempt(request, account, runtimeProxyEgress{url: proxyURL, proxyID: 0, proxyName: "Codex ticket egress"})
+		return s.doOpenAIProxyAttempt(request, account, runtimeProxyEgress{url: proxyURL, proxyID: 0, proxyName: opsProxyNameCodexTicket})
 	}
 	return s.doUpstreamWithProxyFallback(request.Context(), request, account, proxyURL)
 }
