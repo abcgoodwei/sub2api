@@ -31,3 +31,44 @@
 `MIHOMO_INSTALL_SMOKE=1 go test ./internal/mihomo -run TestPinnedAccountRoutesWithOfficialKernel -count=1` 下载仓库锁定的官方内核，通过本地模拟代理验证真实认证与路由，不使用真实订阅或模型请求。
 
 Mihomo 配置依据官方 [Mixed listener](https://wiki.metacubex.one/en/config/inbound/listeners/mixed/) 与 [路由规则](https://wiki.metacubex.one/en/config/rules/) 文档；实际兼容性由上述内核测试验证。
+
+## 连接复用对照实验
+
+`tools/codex_ticket_ab.py` 是独立诊断工具，用于比较采票后保持原 HTTPS 连接和新建 HTTPS 连接的响应。它直接连接上游，不经过 Sub2API 的调度、自动入库或业务注入链路，也不改变服务端连接策略。工具使用 Python 3.10+ 标准库；离线测试额外需要 `openssl`。
+
+每个 trial 先采一张票。只有 HTTP 200、完整 `response.completed`（或完整 JSON 的 `status=completed`）、明确匹配的模型、合格票据结构/时效，以及同次返回的 `__cflb` / `__oailb` 都满足要求时，才执行两组请求：
+
+- `same`：保持采票的原连接；原连接失效时禁止自动重连，记录无效样本。
+- `new`：通过同一个指定代理新建 CONNECT 和 TLS 连接。
+
+两组使用相同请求体、身份头、session/thread/turn 标识、原始票据和 Cookie；不把前一组返回的新票或 Cookie 注入后一组。奇数 trial 顺序为 same→new，偶数为 new→same。Cookie 配对按采票请求开始计时，超过 240 秒不再发送；HTTP 4xx/5xx 停止整个实验，不自动重试或刷新账号 Token。每个 trial 最多 3 次请求，`--trials` 为采票次数预算（包含不合格样本），范围 1–10。
+
+默认 `--scenario tool-continuation`：让起始响应调用无副作用的 `connection_probe` 工具，后续保留完整 response.output（包括 reasoning）并提交匹配 call_id 的工具结果。工具没有任何本地执行能力。`--scenario message` 则重复简单消息请求，用于单独观察跨请求携票行为。两种场景的数据不能混为同一组结果。本工具的请求信封固定使用 Lite、Codex CLI 0.155.0 和 WebSocket beta 头；可用 `--client-version` 显式调整版本，但不应在同一次连接对照中改变其他字段。它不声称完全重放官方客户端或任意生产请求。
+
+离线验证命令：
+
+```bash
+python3 -B -m unittest discover -s tools -p 'test_codex_ticket_ab.py' -v
+```
+
+测试启动本地 TLS 服务及 HTTP CONNECT 代理，服务端按实际连接编号核验 same→new、new→same 的连接关系，并覆盖断线不重连、完整工具上下文、流内失败、非 200、模型不符、异常票据、超大响应和脱敏。CI 只执行这些离线测试。
+
+显式实测示例（会消耗账号额度，默认 2 个 trial、最多 6 次请求）：
+
+```bash
+# 通过外部配置注入 CODEX_AB_PROXY；值为已固定节点的 HTTP CONNECT 代理 URL。
+# 支持 URL 内的代理认证，但不要把含密码的 URL 写入命令历史或报告。
+python3 -B tools/codex_ticket_ab.py --live \
+  --account /secure/account.json --ticket-length 332 --trials 2
+```
+
+个人票使用 `--ticket-length 292`，Team/Business 票使用 `332`；长度需要与被测账号匹配。支持单账号 JSON、credentials 对象及 Sub2API accounts 导出；多账号导出必须显式指定从 0 开始的 `--account-index`。工具从同一条账号记录中读取 Token 和账号 ID，不接受只有单独授权码的文件。代理必须显式由 `CODEX_AB_PROXY`（或 `--proxy-env` 指定的环境变量）提供；只支持 HTTP CONNECT，不读取系统代理、不切换 Mihomo 选择器。TLS 始终校验目标证书，不提供任意上游 URL 或跳过证书验证选项。
+
+stdout 为 JSONL，仅包含状态、固定错误分类、票据长度、配对 Cookie 是否存在、连接建立次数和实验计数，不包含账号标识、Token、state、Cookie 值、代理地址或响应正文。`completed_model_match` 表示响应完成且模型字段匹配；`success` 还要求连接条件成立，返回票据若存在则必须合格。模型字段缺失也不算成功。summary 的两组成功次数只统计双方连接条件均成立的 `valid_pairs`；采票不合格、原连接丢失、部分执行必须与模型失败区分。退出码 0 仅表示取得有效对照且未因 HTTP 错误停止，不表示目标模型成功或某种连接策略更好；没有有效对照或输入/HTTP 错误为 2，中断为 130。socket timeout 限制单次网络等待，不是实验总时限。
+
+解释结果时需要保留以下限制：
+
+- 原连接由工具禁止重连并通过本地测试核验；它只证明客户端到上游 TLS 连接的连续性，不证明上游内部调度节点不变。
+- 相同代理地址不证明相同公网 IP。动态代理可能在新建连接时更换出口，本工具不探测公网 IP，报告固定标记 `egress_ip_verified=false`。验证纯连接因素应使用已知稳定出口；动态出口实验只能反映“重新连接及其伴随出口变化”的合并影响。
+- 两组顺序执行、共用原票和相同工具结果，第一组可能改变服务端状态；AB/BA 交替只能降低顺序偏差，不能消除重放和时序影响。模型名称、票据长度及单次成功均不证明模型能力或长期稳定性。
+- 默认实验固定 Cookie 策略，未验证 240 秒以后的行为。离线测试只能验证实验工具和连接条件，真实上游效果必须另行记录，不能从 CI 通过推导。
